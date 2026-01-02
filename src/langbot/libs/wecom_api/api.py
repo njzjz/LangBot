@@ -13,6 +13,9 @@ import aiofiles
 
 
 class WecomClient:
+    # WeChat Work text message byte limit
+    MAX_TEXT_BYTES = 2048
+
     def __init__(
         self,
         corpid: str,
@@ -48,6 +51,50 @@ class WecomClient:
         self._message_handlers = {
             'example': [],
         }
+
+    @staticmethod
+    def split_message_by_bytes(content: str, max_bytes: int = MAX_TEXT_BYTES) -> list[str]:
+        """
+        Split a message into chunks that don't exceed the byte limit.
+        Ensures that multi-byte characters are not split.
+
+        Args:
+            content: The message content to split
+            max_bytes: Maximum bytes per chunk (default: 2048)
+
+        Returns:
+            List of message chunks
+        """
+        if not content:
+            return []
+
+        content_bytes = content.encode('utf-8')
+        if len(content_bytes) <= max_bytes:
+            return [content]
+
+        chunks = []
+        current_chunk = ''
+        current_bytes = 0
+
+        for char in content:
+            char_bytes = char.encode('utf-8')
+            char_len = len(char_bytes)
+
+            # If adding this character would exceed the limit, start a new chunk
+            if current_bytes + char_len > max_bytes:
+                if current_chunk:
+                    chunks.append(current_chunk)
+                current_chunk = char
+                current_bytes = char_len
+            else:
+                current_chunk += char
+                current_bytes += char_len
+
+        # Add the last chunk if it's not empty
+        if current_chunk:
+            chunks.append(current_chunk)
+
+        return chunks
 
     # access——token操作
     async def check_access_token(self):
@@ -89,19 +136,32 @@ class WecomClient:
                 raise Exception('未获取用户')
 
     async def send_to_all(self, content: str, agent_id: int):
+        """
+        Send a message to all users. If the message exceeds 2048 bytes,
+        it will be split and sent in multiple parts.
+
+        Args:
+            content: The message content
+            agent_id: The agent ID
+        """
         if not self.check_access_token_for_contacts():
             self.access_token_for_contacts = await self.get_access_token(self.secret_for_contacts)
 
-            url = self.base_url + '/message/send?access_token=' + self.access_token_for_contacts
-            user_ids = await self.get_users()
-            user_ids_string = '|'.join(user_ids)
-            async with httpx.AsyncClient() as client:
+        url = self.base_url + '/message/send?access_token=' + self.access_token_for_contacts
+        user_ids = await self.get_users()
+        user_ids_string = '|'.join(user_ids)
+
+        # Split message if it exceeds the byte limit
+        message_chunks = self.split_message_by_bytes(content, self.MAX_TEXT_BYTES)
+
+        async with httpx.AsyncClient() as client:
+            for chunk in message_chunks:
                 params = {
                     'touser': user_ids_string,
                     'msgtype': 'text',
                     'agentid': agent_id,
                     'text': {
-                        'content': content,
+                        'content': chunk,
                     },
                     'safe': 0,
                     'enable_id_trans': 0,
@@ -193,31 +253,44 @@ class WecomClient:
                 raise Exception('Failed to send file: ' + str(data))
 
     async def send_private_msg(self, user_id: str, agent_id: int, content: str):
+        """
+        Send a private message to a user. If the message exceeds 2048 bytes,
+        it will be split and sent in multiple parts.
+
+        Args:
+            user_id: The user ID to send the message to
+            agent_id: The agent ID
+            content: The message content
+        """
         if not await self.check_access_token():
             self.access_token = await self.get_access_token(self.secret)
 
+        # Split message if it exceeds the byte limit
+        message_chunks = self.split_message_by_bytes(content, self.MAX_TEXT_BYTES)
+
         url = self.base_url + '/message/send?access_token=' + self.access_token
         async with httpx.AsyncClient() as client:
-            params = {
-                'touser': user_id,
-                'msgtype': 'text',
-                'agentid': agent_id,
-                'text': {
-                    'content': content,
-                },
-                'safe': 0,
-                'enable_id_trans': 0,
-                'enable_duplicate_check': 0,
-                'duplicate_check_interval': 1800,
-            }
-            response = await client.post(url, json=params)
-            data = response.json()
-            if data['errcode'] == 40014 or data['errcode'] == 42001:
-                self.access_token = await self.get_access_token(self.secret)
-                return await self.send_private_msg(user_id, agent_id, content)
-            if data['errcode'] != 0:
-                await self.logger.error(f'发送消息失败:{data}')
-                raise Exception('Failed to send message: ' + str(data))
+            for chunk in message_chunks:
+                params = {
+                    'touser': user_id,
+                    'msgtype': 'text',
+                    'agentid': agent_id,
+                    'text': {
+                        'content': chunk,
+                    },
+                    'safe': 0,
+                    'enable_id_trans': 0,
+                    'enable_duplicate_check': 0,
+                    'duplicate_check_interval': 1800,
+                }
+                response = await client.post(url, json=params)
+                data = response.json()
+                if data['errcode'] == 40014 or data['errcode'] == 42001:
+                    self.access_token = await self.get_access_token(self.secret)
+                    return await self.send_private_msg(user_id, agent_id, content)
+                if data['errcode'] != 0:
+                    await self.logger.error(f'发送消息失败:{data}')
+                    raise Exception('Failed to send message: ' + str(data))
 
     async def handle_callback_request(self):
         """处理回调请求（独立端口模式，使用全局 request）。"""
