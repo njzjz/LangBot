@@ -53,7 +53,7 @@ class WecomClient:
         }
 
     @staticmethod
-    def split_message_by_bytes(content: str, max_bytes: int = MAX_TEXT_BYTES) -> list[str]:
+    def split_message_by_bytes(content: str, max_bytes: int = 2048) -> list[str]:
         """
         Split a message into chunks that don't exceed the byte limit.
         Ensures that multi-byte characters are not split.
@@ -82,8 +82,7 @@ class WecomClient:
 
             # If adding this character would exceed the limit, start a new chunk
             if current_bytes + char_len > max_bytes:
-                if current_chunk:
-                    chunks.append(current_chunk)
+                chunks.append(current_chunk)
                 current_chunk = char
                 current_bytes = char_len
             else:
@@ -286,8 +285,11 @@ class WecomClient:
                 response = await client.post(url, json=params)
                 data = response.json()
                 if data['errcode'] == 40014 or data['errcode'] == 42001:
+                    # Token expired, refresh and retry this chunk
                     self.access_token = await self.get_access_token(self.secret)
-                    return await self.send_private_msg(user_id, agent_id, content)
+                    url = self.base_url + '/message/send?access_token=' + self.access_token
+                    response = await client.post(url, json=params)
+                    data = response.json()
                 if data['errcode'] != 0:
                     await self.logger.error(f'发送消息失败:{data}')
                     raise Exception('Failed to send message: ' + str(data))
